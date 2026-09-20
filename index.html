@@ -48,7 +48,6 @@
       cursor: pointer;
     }
     .mic { background: #ff3d8e; color: #14010a; }
-    .demo { background: #22181f; color: #f2e9f4; box-shadow: inset 0 0 0 1px #4a3344; }
     button:hover { filter: brightness(1.08); }
     #hint {
       position: fixed;
@@ -74,8 +73,7 @@
       <h1>Video wall</h1>
       <p>Zwart + neonbuizen. Magenta, cyan, lime. Strobe op de kick.</p>
       <div class="row">
-        <button class="mic" id="startMic">Start met microfoon</button>
-        <button class="demo" id="startDemo">Preview zonder mic</button>
+        <button class="mic" id="startMic">Start</button>
       </div>
     </div>
   </div>
@@ -377,23 +375,20 @@
     }
     requestAnimationFrame(frame);
 
-    async function start(mic) {
-      useMic = false;
-      if (mic) {
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-          video: false,
-        });
-        const src = audioCtx.createMediaStreamSource(stream);
-        analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 2048;
-        analyser.smoothingTimeConstant = 0.45;
-        src.connect(analyser);
-        freq = new Uint8Array(analyser.frequencyBinCount);
-        useMic = true;
-        if (audioCtx.state === "suspended") await audioCtx.resume();
-      }
+    async function start() {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        video: false,
+      });
+      const src = audioCtx.createMediaStreamSource(stream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.45;
+      src.connect(analyser);
+      freq = new Uint8Array(analyser.frequencyBinCount);
+      useMic = true;
+      if (audioCtx.state === "suspended") await audioCtx.resume();
       running = true;
       lastSwitch = performance.now();
       idleT0 = performance.now();
@@ -408,12 +403,10 @@
     }
 
     document.getElementById("startMic").onclick = () => {
-      start(true).catch((err) => {
-        alert("Mic geweigerd. Preview gaat aan.\n" + err.message);
-        start(false);
+      start().catch((err) => {
+        alert("Microfoon nodig.\n" + err.message);
       });
     };
-    document.getElementById("startDemo").onclick = () => start(false);
 
     const names = ["wires", "hex", "arcs", "knot"];
     function flash(text) {
