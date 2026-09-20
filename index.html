@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Party wall</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #050308;
+      overflow: hidden;
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      color: #f2e9f4;
+    }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #ui {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      background: radial-gradient(ellipse at 50% 40%, #1a0a18 0%, #050308 70%);
+      z-index: 2;
+    }
+    #ui.gone { display: none; }
+    .card {
+      width: min(640px, 90vw);
+      text-align: center;
+    }
+    h1 {
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-size: 13px;
+      color: #c48cff;
+      margin: 0 0 12px;
+    }
+    p { margin: 0 0 28px; line-height: 1.5; color: #c9b8c8; }
+    .row { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    button {
+      appearance: none;
+      border: 0;
+      border-radius: 999px;
+      padding: 14px 26px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .mic { background: #ff3d8e; color: #14010a; }
+    .demo { background: #22181f; color: #f2e9f4; box-shadow: inset 0 0 0 1px #4a3344; }
+    button:hover { filter: brightness(1.08); }
+    #hint {
+      position: fixed;
+      left: 50%;
+      bottom: 28px;
+      transform: translateX(-50%);
+      z-index: 1;
+      font-size: 13px;
+      letter-spacing: 0.04em;
+      color: rgba(242, 233, 244, 0.55);
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.6s ease;
+    }
+    #hint.show { opacity: 1; }
+    body.hide-cursor, body.hide-cursor * { cursor: none !important; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="ui">
+    <div class="card">
+      <h1>Video wall</h1>
+      <p>Zwart + neonbuizen. Magenta, cyan, lime. Strobe op de kick.</p>
+      <div class="row">
+        <button class="mic" id="startMic">Start met microfoon</button>
+        <button class="demo" id="startDemo">Preview zonder mic</button>
+      </div>
+    </div>
+  </div>
+  <div id="hint">1–4 scenes · F fullscreen · +/− gevoeligheid · spatie pauze cycle</div>
+  <script>
+    const canvas = document.getElementById("c");
+    const gl = canvas.getContext("webgl", { antialias: false, alpha: false, powerPreference: "high-performance" });
+    if (!gl) throw new Error("WebGL ontbreekt");
+
+    const vertSrc = `
+      attribute vec2 a;
+      void main() { gl_Position = vec4(a, 0.0, 1.0); }
+    `;
+
+    const fragSrc = `
+      precision highp float;
+      uniform vec2 uRes;
+      uniform float uTime;
+      uniform float uBass;
+      uniform float uMid;
+      uniform float uHigh;
+      uniform float uEnergy;
+      uniform float uScene;
+      uniform float uStrobe;
+      uniform float uPhase;
+
+      vec3 hue(float t) {
+        float x = fract(t);
+        if (x < 0.25) return mix(vec3(1.00, 0.05, 0.55), vec3(0.05, 0.95, 1.00), x * 4.0);
+        if (x < 0.50) return mix(vec3(0.05, 0.95, 1.00), vec3(0.35, 1.00, 0.15), (x - 0.25) * 4.0);
+        if (x < 0.75) return mix(vec3(0.35, 1.00, 0.15), vec3(1.00, 0.80, 0.08), (x - 0.50) * 4.0);
+        return mix(vec3(1.00, 0.80, 0.08), vec3(1.00, 0.05, 0.55), (x - 0.75) * 4.0);
+      }
+
+      float tube(float d, float w) {
+        float core = exp(-d * d / (w * w));
+        float halo = exp(-d * d / (w * w * 22.0));
+        return core * 1.55 + halo * 0.42;
+      }
+
+      vec3 drawTube(float d, float w, vec3 color, float gain) {
+        float n = tube(d, w) * gain;
+        float core = exp(-d * d / (w * w * 0.28));
+        return color * n + vec3(1.15, 1.1, 1.2) * core * gain * 0.85;
+      }
+
+      vec2 rot(vec2 p, float a) {
+        float c = cos(a), s = sin(a);
+        return vec2(c * p.x - s * p.y, s * p.x + c * p.y);
+      }
+
+      float hex(vec2 p) {
+        p = abs(p);
+        return max(p.x * 0.866025 + p.y * 0.5, p.y);
+      }
+
+      float sdSeg(vec2 p, vec2 a, vec2 b) {
+        vec2 pa = p - a, ba = b - a;
+        float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+        return length(pa - ba * h);
+      }
+
+      vec3 sceneWires(vec2 uv, float t) {
+        vec3 col = vec3(0.0);
+        float amp = 0.055 + uEnergy * 0.145;
+        float freq = 5.2;
+        float w = 0.0054 + uEnergy * 0.0032;
+        for (int i = 0; i < 7; i++) {
+          float fi = float(i);
+          float y0 = (fi - 3.0) * 0.145;
+          float y = y0
+            + amp * sin(uv.x * freq + uPhase * 1.15 + fi * 0.9)
+            + amp * 0.35 * sin(uv.x * 8.4 - uPhase * 0.7 + fi)
+            + uEnergy * 0.04 * sin(uv.x * 13.0 + uPhase * 1.8 + fi);
+          float d = abs(uv.y - y);
+          vec3 c = hue(fi * 0.17 + t * 0.035 + uMid * 0.08);
+          col += drawTube(d, w, c, 0.38 + uEnergy * 0.62 + uStrobe * 0.08);
+        }
+        return col;
+      }
+
+      vec3 sceneHex(vec2 uv, float t) {
+        vec3 col = vec3(0.0);
+        float spin = uPhase * 0.32;
+        float w = 0.0054 + uEnergy * 0.0034;
+        for (int i = 0; i < 5; i++) {
+          float fi = float(i);
+          float r = 0.16 + fi * 0.13;
+          float dir = mod(fi, 2.0) == 0.0 ? 1.0 : -1.0;
+          vec2 p = rot(uv, spin * dir * (0.75 + fi * 0.12));
+          float d = abs(hex(p) - r);
+          vec3 c = hue(0.08 + fi * 0.2 + t * 0.03 + uMid * 0.1);
+          col += drawTube(d, w, c, 0.36 + uEnergy * 0.64 + uStrobe * 0.08);
+        }
+        return col;
+      }
+
+      vec3 sceneArcs(vec2 uv, float t) {
+        vec3 col = vec3(0.0);
+        float ang = atan(uv.y, uv.x);
+        float rad = length(uv);
+        float w = 0.0052 + uEnergy * 0.0034;
+        for (int i = 0; i < 6; i++) {
+          float fi = float(i);
+          float r = 0.14 + fi * 0.12;
+          float d = abs(rad - r);
+          float gate = 0.5 + 0.5 * sin(ang * 3.0 - uPhase * 1.1 + fi);
+          gate = smoothstep(0.22 - uEnergy * 0.12, 0.72, gate);
+          vec3 c = hue(fi * 0.18 + t * 0.04);
+          col += drawTube(d, w, c, gate * (0.34 + uEnergy * 0.66 + uStrobe * 0.08));
+
+          float beadA = uPhase * 0.55 + fi * 1.1;
+          vec2 bead = vec2(cos(beadA), sin(beadA)) * r;
+          col += drawTube(length(uv - bead), 0.011 + uEnergy * 0.006, c, 0.22 + uEnergy * 0.55);
+        }
+        return col;
+      }
+
+      vec2 knot(float s, float t) {
+        float ph = uPhase * 0.7;
+        return 0.38 * vec2(sin(6.28318 * 2.0 * s + ph), sin(6.28318 * 3.0 * s + ph * 0.7));
+      }
+
+      vec3 sceneKnot(vec2 uv, float t) {
+        vec3 col = vec3(0.0);
+        float w = 0.0052 + uEnergy * 0.0034;
+        float d1 = 10.0;
+        float d2 = 10.0;
+        vec2 prev1 = knot(0.0, t);
+        vec2 prev2 = knot(0.0, t + 1.7) * vec2(1.12, 0.84);
+        for (int i = 1; i <= 36; i++) {
+          float s = float(i) / 36.0;
+          vec2 p1 = knot(s, t);
+          vec2 p2 = knot(s, t + 1.7) * vec2(1.12, 0.84);
+          d1 = min(d1, sdSeg(uv, prev1, p1));
+          d2 = min(d2, sdSeg(uv, prev2, p2));
+          prev1 = p1;
+          prev2 = p2;
+        }
+        col += drawTube(d1, w, hue(0.05 + t * 0.03), 0.36 + uEnergy * 0.64 + uStrobe * 0.08);
+        col += drawTube(d2, w, hue(0.55 + t * 0.03), 0.28 + uEnergy * 0.55);
+
+        for (int k = 0; k < 3; k++) {
+          float fk = float(k);
+          float s = fract(uPhase * 0.12 + fk * 0.33);
+          vec2 q = knot(s, t);
+          col += drawTube(length(uv - q), 0.012 + uEnergy * 0.006, hue(0.15 + fk * 0.2), 0.22 + uEnergy * 0.55);
+        }
+        return col;
+      }
+
+      void main() {
+        vec2 uv = (gl_FragCoord.xy - 0.5 * uRes) / uRes.y;
+        float t = uTime;
+        vec3 col;
+        if (uScene < 0.5) col = sceneWires(uv, t);
+        else if (uScene < 1.5) col = sceneHex(uv, t);
+        else if (uScene < 2.5) col = sceneArcs(uv, t);
+        else col = sceneKnot(uv, t);
+
+        col += vec3(0.01, 0.003, 0.016);
+        col *= 1.0 + uStrobe * 0.18;
+        col = pow(max(col, 0.0), vec3(0.92));
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `;
+
+    function compile(type, src) {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+        throw new Error(gl.getShaderInfoLog(s));
+      }
+      return s;
+    }
+
+    const prog = gl.createProgram();
+    gl.attachShader(prog, compile(gl.VERTEX_SHADER, vertSrc));
+    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fragSrc));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    gl.useProgram(prog);
+
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    const loc = gl.getAttribLocation(prog, "a");
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+    const U = {
+      res: gl.getUniformLocation(prog, "uRes"),
+      time: gl.getUniformLocation(prog, "uTime"),
+      bass: gl.getUniformLocation(prog, "uBass"),
+      mid: gl.getUniformLocation(prog, "uMid"),
+      high: gl.getUniformLocation(prog, "uHigh"),
+      energy: gl.getUniformLocation(prog, "uEnergy"),
+      scene: gl.getUniformLocation(prog, "uScene"),
+      strobe: gl.getUniformLocation(prog, "uStrobe"),
+      phase: gl.getUniformLocation(prog, "uPhase"),
+    };
+
+    let scene = 0;
+    let sense = 1.15;
+    let auto = true;
+    let lastSwitch = performance.now();
+    let running = false;
+    let useMic = false;
+    let analyser = null;
+    let freq = null;
+    let audioCtx = null;
+    let bass = 0, mid = 0, high = 0, energy = 0, strobe = 0, bassSlow = 0;
+    let speed = 0.2, glow = 0.2, phase = 0, baseline = 0.28, lastNow = performance.now();
+    let idleT0 = performance.now();
+    window.__drive = { speed: 0, glow: 0, target: 0 };
+
+    function steer(cur, target, dt, gas, brake) {
+      if (target >= cur) {
+        const k = 1 - Math.exp(-dt * gas);
+        return cur + (target - cur) * k;
+      }
+      const gap = Math.max(0.0001, cur - target);
+      const soft = brake * (gap / (gap + 0.28));
+      const k = 1 - Math.exp(-dt * Math.max(0.28, soft));
+      return cur + (target - cur) * k;
+    }
+
+    function resize() {
+      const wide = window.innerWidth >= 3000;
+      const dpr = wide ? 1 : Math.min(window.devicePixelRatio || 1, 1.5);
+      canvas.width = Math.max(1, Math.floor(window.innerWidth * dpr));
+      canvas.height = Math.max(1, Math.floor(window.innerHeight * dpr));
+      gl.viewport(0, 0, canvas.width, canvas.height);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    function band(data, a, b) {
+      let s = 0;
+      const n = Math.max(1, b - a);
+      for (let i = a; i < b; i++) s += data[i];
+      return (s / n) / 255;
+    }
+
+    function sampleAudio(now) {
+      const dt = Math.min(0.05, Math.max(0.001, (now - lastNow) / 1000));
+      lastNow = now;
+      let target = 0.2;
+      if (useMic && analyser) {
+        analyser.getByteFrequencyData(freq);
+        const tb = Math.min(1, band(freq, 1, 14) * sense * 1.8);
+        const tm = Math.min(1, band(freq, 10, 70) * sense * 1.7);
+        const th = Math.min(1, band(freq, 50, 180) * sense * 1.5);
+        const raw = Math.min(1, band(freq, 1, 200) * sense * 2.0);
+        baseline = steer(baseline, raw, dt, 0.11, 0.11);
+        const above = Math.max(0, raw - baseline);
+        const below = Math.max(0, baseline - raw);
+        const expanded = Math.pow(raw, 1.7);
+        target = Math.min(1, Math.max(0, expanded * 0.42 + above * 2.6 - below * 1.1));
+        bass = steer(bass, tb, dt, 2.2, 1.8);
+        mid = steer(mid, tm, dt, 2.0, 1.6);
+        high = steer(high, th, dt, 2.4, 1.8);
+      } else if (running) {
+        const t = (now - idleT0) * 0.001;
+        target = ((t / 6.5) % 2) < 1 ? 0.88 : 0.08;
+        bass = steer(bass, target * 0.75, dt, 1.8, 1.5);
+        mid = steer(mid, 0.25 + target * 0.35, dt, 1.6, 1.4);
+        high = steer(high, 0.2 + target * 0.3, dt, 1.8, 1.5);
+      } else {
+        target = 0.18;
+      }
+      speed = steer(speed, target, dt, 0.72, 1.2);
+      glow = steer(glow, target, dt, 1.35, 1.15);
+      energy = glow;
+      phase += dt * (0.2 + speed * 2.2);
+      bassSlow = steer(bassSlow, bass, dt, 1.2, 0.7);
+      strobe = steer(strobe, Math.min(1, Math.max(0, bass - bassSlow - 0.18) * 1.1), dt, 3.2, 2.4);
+      window.__drive = { speed, glow, target, phase, baseline };
+    }
+
+    function frame(now) {
+      sampleAudio(now);
+      if (auto && running && now - lastSwitch > 50000) {
+        scene = (scene + 1) % 4;
+        lastSwitch = now;
+      }
+      gl.uniform2f(U.res, canvas.width, canvas.height);
+      gl.uniform1f(U.time, now * 0.001);
+      gl.uniform1f(U.bass, bass);
+      gl.uniform1f(U.mid, mid);
+      gl.uniform1f(U.high, high);
+      gl.uniform1f(U.energy, energy);
+      gl.uniform1f(U.strobe, strobe);
+      gl.uniform1f(U.phase, phase);
+      gl.uniform1f(U.scene, scene);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+
+    async function start(mic) {
+      useMic = false;
+      if (mic) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+          video: false,
+        });
+        const src = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        analyser.smoothingTimeConstant = 0.45;
+        src.connect(analyser);
+        freq = new Uint8Array(analyser.frequencyBinCount);
+        useMic = true;
+        if (audioCtx.state === "suspended") await audioCtx.resume();
+      }
+      running = true;
+      lastSwitch = performance.now();
+      idleT0 = performance.now();
+      lastNow = idleT0;
+      speed = 0.15;
+      glow = 0.15;
+      baseline = 0.28;
+      document.getElementById("ui").classList.add("gone");
+      const hint = document.getElementById("hint");
+      hint.classList.add("show");
+      setTimeout(() => hint.classList.remove("show"), 5000);
+    }
+
+    document.getElementById("startMic").onclick = () => {
+      start(true).catch((err) => {
+        alert("Mic geweigerd. Preview gaat aan.\n" + err.message);
+        start(false);
+      });
+    };
+    document.getElementById("startDemo").onclick = () => start(false);
+
+    const names = ["wires", "hex", "arcs", "knot"];
+    function flash(text) {
+      const hint = document.getElementById("hint");
+      hint.textContent = text;
+      hint.classList.add("show");
+      clearTimeout(flash._t);
+      flash._t = setTimeout(() => hint.classList.remove("show"), 1800);
+    }
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key >= "1" && e.key <= "4") {
+        scene = Number(e.key) - 1;
+        lastSwitch = performance.now();
+        flash(names[scene]);
+      } else if (e.key === "f" || e.key === "F") {
+        if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+        else document.exitFullscreen();
+      } else if (e.key === " " && running) {
+        e.preventDefault();
+        auto = !auto;
+        flash(auto ? "cycle aan" : "cycle uit");
+      } else if (e.key === "+" || e.key === "=") {
+        sense = Math.min(3, sense + 0.15);
+        flash("gevoel " + sense.toFixed(2));
+      } else if (e.key === "-" || e.key === "_") {
+        sense = Math.max(0.4, sense - 0.15);
+        flash("gevoel " + sense.toFixed(2));
+      } else if (e.key === "ArrowRight") {
+        scene = (scene + 1) % 4;
+        lastSwitch = performance.now();
+        flash(names[scene]);
+      } else if (e.key === "ArrowLeft") {
+        scene = (scene + 3) % 4;
+        lastSwitch = performance.now();
+        flash(names[scene]);
+      }
+    });
+
+    let hideTimer;
+    function bumpCursor() {
+      document.body.classList.remove("hide-cursor");
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => document.body.classList.add("hide-cursor"), 2500);
+    }
+    window.addEventListener("mousemove", bumpCursor);
+  </script>
+</body>
+</html>
